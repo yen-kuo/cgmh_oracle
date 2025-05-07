@@ -1,0 +1,105 @@
+Declare
+   SYS          DATE;
+   -- 外購收料資料
+   Cursor CurRecv Is
+     SELECT * FROM RSUPRECV
+     WHERE SIGNDAT LIKE TO_CHAR(TO_NUMBER(TO_CHAR(ADD_MONTHS(SYSDATE,-2),'YYYYMM'))-191100)||'%'
+       AND NL = '9' AND ORDID = '1' ;
+   -- 暫估項目
+   Cursor CurEITM Is
+     Select FId From RFprExch Where DtId = 'GPA1' Or DtId = 'GPAF'
+     Union
+     Select 'AK' FId From Dual
+     Union
+     Select 'AX' FId From Dual
+     Union
+     Select 'AL' FId From Dual ;
+   Cursor CurTPEST Is
+     	SELECT RFPRMAIN.*
+      FROM RFPRMAIN
+      JOIN RSUPRECV ON RSUPRECV.PURNO = RFPRMAIN.PURNO
+      JOIN RFPREXCH ON RFPRMAIN.FID = RFPREXCH.FID
+      WHERE RSUPRECV.SIGNDAT LIKE '11305%'and ORDID = '1' and NL = '9'
+       AND RFPREXCH.DTID = 'GPA1';
+   nCnt           Number(2,0) := 0 ;
+   -- 檢查費用是否已經發生
+   Function checkEst(sPurNo varchar2,sOrdLNo Varchar2,sShpLNo Varchar2,sCoId Varchar2,sFId Varchar2) Return Number Is
+     nEst         Number(2,0) := 0 ;
+   Begin
+     Select Count(*) Into nEst From RFprMain
+     Where PurNo = sPurNo And OrdLNo = sOrdLNo And ShpLNo = sShpLNo And CoId = sCoId
+       And FId = sFId ;
+     Return nEst ;
+   End ;
+   -- 取得暫估金額
+   Function getTpEstAmt(sPurNo varchar2,sOrdLNo Varchar2,sShpLNo Varchar2,sCoId Varchar2,sFId Varchar2) Return Number Is
+     nTpEstAmt    RFprMain.TpEstAmt%Type := -1 ;
+   Begin
+     Select TpEstAmt Into nTpEstAmt From RFprExch
+     Where DtId = 'ESTM' And FId = sFId ;
+     Return nTpEstAmt ;
+   Exception
+     When Others then
+       return -2 ;
+   End ;
+   -- 產生暫估資料
+   Procedure insertEst(sPurNo varchar2,sOrdLNo Varchar2,sShpLNo Varchar2,sCoId Varchar2,sFId Varchar2) Is
+     nTpEstAmt    RFprMain.TpEstAmt%Type ;
+     HAS_PES      BOOLEAN := FALSE;
+     PES          NUMBER;
+     CURSOR judge_estm IS
+       SELECT FID FROM RFPREXCH WHERE DTID = 'ESTM';
+   Begin
+     nTpEstAmt := getTpEstAmt(sPurNo,sOrdLNo,sShpLNo,sCoId,sFId) ;
+     IF (sFId = 'AK' OR sFId = 'AF'OR sFId = 'AX'OR sFId = 'AL') THEN
+      DBMS_OUTPUT.PUT_LINE(sPurNo||'|'||sFId||'|'||nTpEstAmt);
+      INSERT INTO RFPRMAIN (PURNO, ORDLNO, SHPLNO, COID, FID, TPESTAMT, TPESTDAT, INSFLDAT) 
+      VALUES (sPurNo, sOrdLNo, sShpLNo, sCoId, sFId, nTpEstAmt, TO_DATE('20240531','YYYYMMDD'), SYS);
+     ELSIF sFId IN ('A2', 'AA', 'AB', 'An', 'AM', 'AS') THEN
+       HAS_PES := TRUE;
+     ELSIF NOT HAS_PES AND sFId <> 'A6' THEN
+       DBMS_OUTPUT.PUT_LINE(sPurNo||'|'||sFId||'|'||nTpEstAmt||'*');
+       SELECT A.SHPOCRYAMT * C.EXR
+       INTO PES
+       FROM RSUPIMSD A, RFPREXCH C
+       WHERE PURNO = sPurNo
+         AND A.SHPCUCY = C.CUCY
+         AND A.ORDLNO = sOrdLNo
+         AND A.SHPLNO = sShpLNo;
+       INSERT INTO RFPRMAIN (PURNO, ORDLNO, SHPLNO, COID, FID, TPESTAMT, TPESTDAT, INSFLDAT) 
+       VALUES (sPurNo, sOrdLNo, sShpLNo, sCoId, sFId, PES, TO_DATE('20240531','YYYYMMDD'), SYS);
+     END IF;
+     --Dbms_Output.Put_Line(nTpEstAmt) ;
+   End ;
+ -- 主程式
+
+ Begin
+   SELECT SYSDATE INTO SYS FROM DUAL;
+   for crRecv In CurRecv Loop
+     --Dbms_Output.Put_Line(crRecv.PurNo) ;
+     --nCnt := nCnt + 1 ;
+     for crEItm In CurEITM Loop
+       --nCnt := checkEst(crRecv.PurNo,crRecv.LNo,crRecv.FPShpLNo,crRecv.CoId,'AK') ;
+       nCnt := checkEst(crRecv.PurNo,crRecv.LNo,crRecv.FPShpLNo,crRecv.CoId,crEItm.FId) ;
+       if nCnt = 0 then
+         --Dbms_OutPut.Put_Line(crRecv.PurNo||'暫估AK') ;
+         Dbms_OutPut.Put_Line(crRecv.PurNo||'暫估'||crEItm.FId) ;
+         --insertEst(crRecv.PurNo,crRecv.LNo,crRecv.FPShpLNo,crRecv.CoId,'AK') ;
+         insertEst(crRecv.PurNo,crRecv.LNo,crRecv.FPShpLNo,crRecv.CoId,crEItm.FId) ;
+       else
+         --Dbms_Output.Put_Line(crRecv.PurNo||'AK已經暫估') ;
+         For TPEST in CurTPEST Loop
+           IF (TPEST.RLAMT = 0 AND TPEST.TPESTAMT = 0)  THEN
+             UPDATE RFPRMAIN SET TPESTAMT = TPEST.TPBRWAMT, TPESTDAT = TO_DATE('20240531','YYYYMMDD'), INSFLDAT = SYS WHERE PURNO = TPEST.PURNO ;
+           END IF;
+         End Loop;
+         Dbms_Output.Put_Line(crRecv.PurNo||crEItm.FId||'已經暫估') ;      
+       end if ;
+     End Loop ;
+   End Loop ;
+   --Dbms_Output.Put_Line('Total Count:'||nCnt) ;
+ Exception
+   When Others then
+     Dbms_Output.Put_Line(SqlErrm) ;
+ End ;
+/
